@@ -2517,3 +2517,433 @@ footer {
     white-space: nowrap;
     transition: background .2s, color .2s;
   }
+
+/* =============================================================================
+ * NEW SECTIONS (charts.js) — appended below the original stylesheet.
+ * Everything above this line is the original file, unmodified.
+ * All rules are prefixed .ext- and reuse the existing design tokens
+ * (--surface, --bd, --muted, --green ...) so the new cards sit inside the
+ * existing visual identity rather than beside it.
+ * ========================================================================== */
+
+#osmsg-ext {
+    width: var(--container);
+    margin: 40px auto 0;
+}
+
+/* --- Card shell ---------------------------------------------------------- */
+.ext-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+    align-items: stretch;
+}
+
+.ext-card {
+    background: var(--surface);
+    border: 1px solid var(--bd);
+    border-radius: 16px;
+    box-shadow: var(--shadow-s1);
+    padding: 20px 22px 22px;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.ext-card--wide {
+    grid-column: 1 / -1;
+}
+
+.ext-card-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 4px;
+}
+
+.ext-card-title {
+    font-family: var(--font-sans);
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+}
+
+.ext-card-title svg {
+    width: 14px;
+    height: 14px;
+    flex: none;
+    color: var(--green);
+}
+
+.ext-card-meta {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--muted);
+    text-align: right;
+    white-space: nowrap;
+}
+
+.ext-card-sub {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 16px;
+}
+
+.ext-card-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* --- Demo badge ---------------------------------------------------------- */
+.ext-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: var(--warn-pale);
+    color: var(--warn-ink);
+    border: 1px solid rgba(184, 134, 11, 0.28);
+    white-space: nowrap;
+}
+
+/* --- State blocks (loading / empty / error) ------------------------------ */
+.ext-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 34px 18px;
+    gap: 8px;
+    min-height: 180px;
+}
+
+.ext-state-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    display: grid;
+    place-items: center;
+    background: var(--surface-alt);
+    color: var(--muted);
+    margin-bottom: 2px;
+}
+
+.ext-state-icon svg {
+    width: 17px;
+    height: 17px;
+}
+
+.ext-state-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--ink-2);
+}
+
+.ext-state-msg {
+    font-size: 12.5px;
+    color: var(--muted);
+    max-width: 46ch;
+    line-height: 1.55;
+}
+
+.ext-state--error .ext-state-icon {
+    background: var(--danger-pale);
+    color: var(--danger);
+}
+
+.ext-state-retry {
+    margin-top: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 7px 15px;
+    border-radius: 9px;
+    border: 1px solid var(--bd-strong);
+    background: var(--surface);
+    color: var(--ink-2);
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+}
+
+.ext-state-retry:hover {
+    background: var(--surface-alt);
+    border-color: var(--green-soft);
+}
+
+/* --- Skeletons ----------------------------------------------------------- */
+@keyframes ext-shim {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+.ext-skel {
+    border-radius: 7px;
+    background: linear-gradient(90deg, var(--surface-alt) 25%, #ece7db 37%, var(--surface-alt) 63%);
+    background-size: 200% 100%;
+    animation: ext-shim 1.5s linear infinite;
+}
+
+.ext-skel-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 11px;
+    padding: 6px 0;
+    width: 100%;
+}
+
+.ext-skel-row {
+    height: 34px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ext-skel { animation: none; }
+}
+
+/* --- Charts -------------------------------------------------------------- */
+
+/* Pie chart beside its legend. */
+.ext-chart-split {
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(170px, 230px);
+    gap: 20px;
+    align-items: center;
+    min-width: 0;
+}
+
+.ext-chart-canvas {
+    position: relative;
+    min-width: 0;
+}
+
+.ext-chart-canvas--pie {
+    height: 330px;
+}
+
+.ext-chart-canvas--bar {
+    height: 370px;
+    flex: 1;
+}
+
+/* Custom legend — Chart.js's built-in legend cannot show a value column. */
+.ext-legend {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+}
+
+.ext-legend-row {
+    display: grid;
+    grid-template-columns: 11px minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 9px;
+    padding: 5px 7px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background .14s;
+}
+
+.ext-legend-row:hover,
+.ext-legend-row:focus-visible {
+    background: var(--green-tint);
+    outline: none;
+}
+
+.ext-legend-row:focus-visible {
+    box-shadow: 0 0 0 2px var(--green-soft);
+}
+
+.ext-legend-swatch {
+    width: 11px;
+    height: 11px;
+    border-radius: 3px;
+    flex: none;
+}
+
+.ext-legend-name {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.ext-legend-value {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--ink-2);
+    white-space: nowrap;
+}
+
+.ext-legend-share {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--muted);
+    white-space: nowrap;
+    min-width: 38px;
+    text-align: right;
+}
+
+/* --- Cluster map --------------------------------------------------------- */
+.ext-map {
+    height: 460px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--bd);
+    background: var(--surface-alt);
+    z-index: 0;
+}
+
+.ext-map-footnote {
+    margin-top: 12px;
+    font-size: 11.5px;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    align-items: center;
+}
+
+.ext-map-legend {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.ext-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+}
+
+.ext-legend-dot {
+    width: 13px;
+    height: 13px;
+    border-radius: 99px;
+    flex: none;
+    border: 2px solid rgba(255, 255, 255, .85);
+}
+
+/* Marker-cluster bubbles, restyled to the OSMSG palette. */
+.ext-cluster {
+    display: grid;
+    place-items: center;
+    border-radius: 99px;
+    color: #fff;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(26, 36, 33, .22);
+    border: 2px solid rgba(255, 255, 255, .9);
+}
+
+.ext-cluster-s { background: #4F8A65; font-size: 11px; }
+.ext-cluster-m { background: #2D5F3F; font-size: 12px; }
+.ext-cluster-l { background: #C77E3D; font-size: 12.5px; }
+.ext-cluster-xl { background: #B5392C; font-size: 13px; }
+
+.ext-pin {
+    width: 11px;
+    height: 11px;
+    border-radius: 99px;
+    background: var(--green);
+    border: 2px solid #fff;
+    box-shadow: 0 1px 4px rgba(26, 36, 33, .3);
+}
+
+.leaflet-popup-content-wrapper {
+    border-radius: 12px;
+    box-shadow: var(--shadow-pop);
+}
+
+.leaflet-popup-content {
+    margin: 12px 14px;
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink-2);
+}
+
+.ext-popup-name {
+    font-weight: 700;
+    color: var(--ink);
+    font-size: 13px;
+}
+
+.ext-popup-row {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 3px;
+}
+
+.ext-popup-tags {
+    margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.ext-popup-tag {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 99px;
+    background: var(--green-pale);
+    color: var(--green-deep);
+}
+
+/* --- Responsive ---------------------------------------------------------- */
+@media (max-width: 1100px) {
+    /* Legend under the pie rather than squeezed beside it. */
+    .ext-chart-split {
+        grid-template-columns: 1fr;
+        gap: 14px;
+    }
+
+    .ext-chart-canvas--pie { height: 280px; }
+    .ext-legend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px 10px; }
+}
+
+@media (max-width: 900px) {
+    .ext-grid { grid-template-columns: 1fr; }
+    .ext-map { height: 380px; }
+    .ext-chart-canvas--bar { height: 330px; }
+}
+
+@media (max-width: 560px) {
+    #osmsg-ext { margin-top: 28px; }
+    .ext-card { padding: 16px 14px 18px; border-radius: 14px; }
+    .ext-card-meta { font-size: 9.5px; }
+    .ext-card-head { flex-wrap: wrap; }
+    .ext-card-meta { margin-left: 0; width: 100%; text-align: left; }
+    .ext-map { height: 320px; }
+    .ext-chart-canvas--pie { height: 230px; }
+    .ext-chart-canvas--bar { height: 290px; }
+    .ext-legend { grid-template-columns: 1fr; }
+    .ext-legend-share { display: none; }
+}

@@ -1,32 +1,567 @@
-"use strict";
+(function () {
 
-const API_ENVIRONMENTS = {
-  render: "https://osmsg-1.onrender.com",
-  production: "https://osmsg.osgeonepal.org",
-};
+  var API_ENVIRONMENTS = {
+    render: {
+      label: "Render (development)",
+      baseUrl: "https://osmsg-1.onrender.com",
+      coldStart: true
+    },
+    production: {
+      label: "OSGeo Nepal (production)",
+      baseUrl: "https://osmsg.osgeonepal.org",
+      coldStart: false
+    }
+  };
 
-const ACTIVE_ENV = "render";
+  var ACTIVE_ENV = "render";
 
-const _param = new URLSearchParams(location.search).get("api");
-const API_BASE =
-  (_param && (API_ENVIRONMENTS[_param] || (_param.startsWith("http") && _param))) ||
-  API_ENVIRONMENTS[ACTIVE_ENV];
+  var apiOverride = new URLSearchParams(location.search).get("api");
+  var envKey = (apiOverride && API_ENVIRONMENTS[apiOverride]) ? apiOverride : ACTIVE_ENV;
+  var env = API_ENVIRONMENTS[envKey] || API_ENVIRONMENTS.production;
+  var baseUrl =
+    (apiOverride && /^https?:\/\//i.test(apiOverride) && apiOverride.replace(/\/+$/, "")) ||
+    env.baseUrl;
 
-const ENDPOINTS = {
-  health: "/health",
-  stats: "/api/v1/stats",
-  hashtagStats: "/api/v1/hashtag-stats",
-  editorStats: "/api/v1/editor-stats",
-  map: "/api/v1/map",
-};
+  var CONFIG = Object.freeze({
+    env: envKey,
+    envLabel: env.label,
+    isProduction: envKey === "production",
+    apiBase: baseUrl,
+    apiHost: new URL(baseUrl).hostname,
+    apiDocsUrl: baseUrl + "/docs/swagger",
+    environments: API_ENVIRONMENTS,
 
-const API_DOCS_URL = `${API_BASE}/docs/swagger`;
-const API_HOST = new URL(API_BASE).hostname;
+    endpoints: Object.freeze({
+      health: "/health",
+      stats: "/api/v1/stats",
+      hashtagStats: "/api/v1/hashtag-stats",
+      editorStats: "/api/v1/editor-stats",
+      map: "/api/v1/map"
+    }),
+
+    http: Object.freeze({
+      timeoutMs: env.coldStart ? 60000 : 20000,
+      retries: env.coldStart ? 2 : 1,
+      retryBaseDelayMs: 1500,
+      cacheTtlMs: 60000
+    }),
+
+    window: Object.freeze({
+      clampToServerClock: true,
+      clampThresholdMs: 60 * 60 * 1000,
+      staleWarnMs: 6 * 60 * 60 * 1000,
+      allTimeStart: "2004-08-09T00:00:00Z"
+    }),
+
+    features: Object.freeze({
+      topHashtags: Object.freeze({ limit: 10 }),
+      topEditors: Object.freeze({ limit: 10 }),
+      changesetClusters: Object.freeze({ limit: 2000 })
+    }),
+
+    demo: Object.freeze({
+      enabled: false,
+      fallbackOnFailure: false,
+      globalName: "OSMSG_DEMO",
+      badgeLabel: "demo data"
+    })
+  });
+
+  window.OSMSG_CONFIG = CONFIG;
+
+  var RANGE_HOURS = { "1h": 1, "24h": 24, "7d": 168, "30d": 720, "90d": 2160 };
+  var serverLastTs = null;
+
+  function setServerClock(lastTs) {
+    serverLastTs = (lastTs instanceof Date && !isNaN(lastTs)) ? lastTs : null;
+  }
+
+  function lagMs() {
+    if (!serverLastTs) return 0;
+    return Math.max(0, Date.now() - serverLastTs.getTime());
+  }
+
+  function isStale() {
+    return lagMs() >= CONFIG.window.staleWarnMs;
+  }
+
+  function lagLabel() {
+    var ms = lagMs();
+    if (!ms) return "";
+    var mins = Math.round(ms / 60000);
+    if (mins < 60) return mins + "m behind";
+    var hrs = Math.round(mins / 60);
+    if (hrs < 48) return hrs + "h behind";
+    return Math.round(hrs / 24) + "d behind";
+  }
+
+  function resolveWindow(rangeKey, opts) {
+    opts = opts || {};
+    var now = new Date();
+
+    if (rangeKey === "custom") {
+      return {
+        start: opts.customStart || new Date(now - 86400000),
+        end: opts.customEnd || now,
+        anchor: "client",
+        clamped: false,
+        lagMs: lagMs()
+      };
+    }
+
+    var shouldClamp =
+      CONFIG.window.clampToServerClock &&
+      serverLastTs &&
+      lagMs() >= CONFIG.window.clampThresholdMs;
+
+    var end = shouldClamp ? new Date(serverLastTs.getTime()) : now;
+    var start = rangeKey === "all"
+      ? new Date(CONFIG.window.allTimeStart)
+      : new Date(end.getTime() - (RANGE_HOURS[rangeKey] || 24) * 3600000);
+
+    return {
+      start: start,
+      end: end,
+      anchor: shouldClamp ? "server" : "client",
+      clamped: !!shouldClamp,
+      lagMs: lagMs()
+    };
+  }
+
+  window.OSMSGTime = {
+    RANGE_HOURS: RANGE_HOURS,
+    resolve: resolveWindow,
+    setServerClock: setServerClock,
+    getServerClock: function () { return serverLastTs; },
+    lagMs: lagMs,
+    lagLabel: lagLabel,
+    isStale: isStale
+  };
+
+  function ApiError(message, opts) {
+    opts = opts || {};
+    var e = new Error(message);
+    e.name = "ApiError";
+    e.kind = opts.kind || "network";
+    e.status = opts.status || null;
+    e.url = opts.url || null;
+    e.cause = opts.cause || null;
+    e.userMessage = (function () {
+      switch (e.kind) {
+        case "timeout":
+          return "The API took too long to respond. Please try again.";
+        case "http":
+          return "The API responded with " + e.status + ".";
+        case "parse":
+          return "The API returned a response that could not be read.";
+        default:
+          return "Could not reach the API. Check your connection or try again.";
+      }
+    })();
+    return e;
+  }
+
+  function buildUrl(endpoint, params) {
+    var url = new URL(endpoint, CONFIG.apiBase);
+    Object.keys(params || {}).forEach(function (k) {
+      var v = params[k];
+      if (v == null || v === "") return;
+      if (Array.isArray(v)) v.forEach(function (x) { url.searchParams.append(k, String(x)); });
+      else url.searchParams.set(k, String(v));
+    });
+    return url;
+  }
+
+  var responseCache = new Map();
+  var inflight = new Map();
+  var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+
+  function getJson(url, options) {
+    options = options || {};
+    var href = String(url);
+    var retries = options.retries != null ? options.retries : CONFIG.http.retries;
+    var useCache = options.cache !== false;
+
+    if (useCache) {
+      var hit = responseCache.get(href);
+      if (hit && Date.now() - hit.at < CONFIG.http.cacheTtlMs) return Promise.resolve(hit.data);
+      var pending = inflight.get(href);
+      if (pending) return pending;
+    }
+
+    var run = (async function () {
+      var lastError = null;
+
+      for (var attempt = 0; attempt <= retries; attempt++) {
+        var ctrl = new AbortController();
+        var onAbort = function () { ctrl.abort(); };
+        if (options.signal) options.signal.addEventListener("abort", onAbort, { once: true });
+        var timedOut = false;
+        var timer = setTimeout(function () { timedOut = true; ctrl.abort(); }, CONFIG.http.timeoutMs);
+
+        try {
+          var res = await fetch(href, {
+            headers: { accept: "application/json" },
+            mode: "cors",
+            credentials: "omit",
+            signal: ctrl.signal
+          });
+
+          if (!res.ok) {
+            throw ApiError("HTTP " + res.status + " " + (res.statusText || ""),
+              { kind: "http", status: res.status, url: href });
+          }
+
+          try {
+            var data = await res.json();
+          } catch (parseErr) {
+            throw ApiError("Malformed JSON response", { kind: "parse", url: href, cause: parseErr });
+          }
+
+          if (useCache) responseCache.set(href, { at: Date.now(), data: data });
+          return data;
+
+        } catch (err) {
+          if (options.signal && options.signal.aborted) {
+            throw ApiError("Request cancelled", { kind: "abort", url: href, cause: err });
+          }
+
+          lastError = err && err.name === "ApiError"
+            ? err
+            : ApiError(timedOut ? "Request timed out" : (err && err.message) || "Network error",
+                { kind: timedOut ? "timeout" : "network", url: href, cause: err });
+
+          if (lastError.kind === "http" && lastError.status < 500) throw lastError;
+
+          if (attempt < retries) {
+            await sleep(CONFIG.http.retryBaseDelayMs * Math.pow(2, attempt));
+            continue;
+          }
+          throw lastError;
+
+        } finally {
+          clearTimeout(timer);
+          if (options.signal) options.signal.removeEventListener("abort", onAbort);
+        }
+      }
+
+      throw lastError;
+    })();
+
+    if (useCache) {
+      inflight.set(href, run);
+      run.then(function () { inflight.delete(href); },
+               function () { inflight.delete(href); });
+    }
+    return run;
+  }
+
+  function toApiTime(d) {
+    return (d instanceof Date ? d : new Date(d)).toISOString().replace(/\.\d+Z$/, "Z");
+  }
+
+  var EP = CONFIG.endpoints;
+
+  var API = {
+    health: function (o) {
+      o = o || {};
+      return getJson(buildUrl(EP.health, {}), { signal: o.signal });
+    },
+    hashtagStats: function (o) {
+      o = o || {};
+      return getJson(buildUrl(EP.hashtagStats, {
+        start: toApiTime(o.start), end: toApiTime(o.end),
+        limit: o.limit != null ? o.limit : CONFIG.features.topHashtags.limit
+      }), { signal: o.signal });
+    },
+    editorStats: function (o) {
+      o = o || {};
+      return getJson(buildUrl(EP.editorStats, {
+        start: toApiTime(o.start), end: toApiTime(o.end),
+        limit: o.limit != null ? o.limit : CONFIG.features.topEditors.limit
+      }), { signal: o.signal });
+    },
+    changesetCentroids: function (o) {
+      o = o || {};
+      return getJson(buildUrl(EP.map, {
+        start: toApiTime(o.start), end: toApiTime(o.end),
+        limit: o.limit != null ? o.limit : CONFIG.features.changesetClusters.limit
+      }), { signal: o.signal });
+    }
+  };
+
+  function num(v) { var n = Number(v); return isFinite(n) ? n : 0; }
+
+  function normaliseTag(raw) {
+    var s = String(raw == null ? "" : raw).trim();
+    if (!s) return null;
+    var bare = s.replace(/^#+/, "");
+    return bare ? "#" + bare : null;
+  }
+
+  function adaptHashtagStats(payload) {
+    var raw =
+      (payload && Array.isArray(payload.hashtags) && payload.hashtags) ||
+      (payload && payload.pagination && Array.isArray(payload.pagination.items) && payload.pagination.items) ||
+      (Array.isArray(payload) ? payload : []);
+
+    var items = [];
+    raw.forEach(function (row) {
+      var tag = normaliseTag(row && (row.hashtag || row.tag || row.name));
+      if (!tag) return;
+      var rec = {
+        tag: tag,
+        label: tag,
+        changes: num(row.map_changes),
+        changesets: num(row.changesets),
+        users: num(row.users),
+        rank: num(row.rank) || null
+      };
+      if (rec.changes || rec.changesets || rec.users) items.push(rec);
+    });
+
+    items.sort(function (a, b) {
+      return (a.rank && b.rank) ? a.rank - b.rank : b.changes - a.changes;
+    });
+
+    var totalChanges = 0;
+    items.forEach(function (r) { totalChanges += r.changes; });
+    items.forEach(function (r, i) {
+      r.rank = i + 1;
+      r.share = totalChanges ? (r.changes / totalChanges) * 100 : 0;
+    });
+
+    var totalChangesets = 0;
+    items.forEach(function (r) { totalChangesets += r.changesets; });
+
+    return {
+      items: items,
+      totalChanges: totalChanges,
+      totalChangesets: totalChangesets,
+      totalHashtags: (payload && payload.pagination && num(payload.pagination.total)) || items.length
+    };
+  }
+
+  function editorFamilyOf(raw) {
+    var s = String(raw == null ? "" : raw).trim();
+    if (!s) return "Unknown";
+    if (/streetcomplete/i.test(s)) return "StreetComplete";
+    if (/every\s*door/i.test(s)) return "Every Door";
+    if (/go\s*map/i.test(s)) return "Go Map!!";
+    if (/vespucci/i.test(s)) return "Vespucci";
+    if (/rapid/i.test(s)) return "Rapid";
+    if (/josm/i.test(s)) return "JOSM";
+    if (/organic\s*maps/i.test(s)) return "Organic Maps";
+    if (/maps\.?me/i.test(s)) return "MAPS.ME";
+    if (/osmand/i.test(s)) return "OsmAnd";
+    if (/potlatch/i.test(s)) return "Potlatch";
+    if (/\biD\b/.test(s)) return "iD";
+    var token = s.split(/[;/(]/)[0].trim();
+    return token.length > 22 ? token.slice(0, 20) + "…" : (token || "Unknown");
+  }
+
+  function adaptEditorStats(payload) {
+    var raw =
+      (payload && Array.isArray(payload.editors) && payload.editors) ||
+      (payload && payload.pagination && Array.isArray(payload.pagination.items) && payload.pagination.items) ||
+      (Array.isArray(payload) ? payload : []);
+
+    var merged = new Map();
+    raw.forEach(function (row) {
+      var family = editorFamilyOf(row && (row.editor || row.name));
+      var e = merged.get(family) || {
+        editor: family, label: family, family: family,
+        users: 0, changes: 0, changesets: 0, variants: []
+      };
+      e.users += num(row.users);
+      e.changes += num(row.map_changes);
+      e.changesets += num(row.changesets);
+      if (row && row.editor && row.editor !== family) e.variants.push(String(row.editor));
+      merged.set(family, e);
+    });
+
+    var items = [];
+    merged.forEach(function (e) {
+      if (e.users || e.changes || e.changesets) items.push(e);
+    });
+    items.sort(function (a, b) { return b.changes - a.changes; });
+
+    var totalChanges = 0, totalUsers = 0, totalChangesets = 0;
+    items.forEach(function (e) {
+      totalChanges += e.changes; totalUsers += e.users; totalChangesets += e.changesets;
+    });
+    items.forEach(function (e, i) {
+      e.rank = i + 1;
+      e.share = totalChanges ? (e.changes / totalChanges) * 100 : 0;
+      e.changesPerUser = e.users ? Math.round(e.changes / e.users) : 0;
+    });
+
+    return {
+      items: items,
+      totalUsers: totalUsers,
+      totalChanges: totalChanges,
+      totalChangesets: totalChangesets,
+      totalEditors: items.length
+    };
+  }
+
+  function validLatLon(lat, lon) {
+    return isFinite(lat) && isFinite(lon) &&
+      lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&
+      !(lat === 0 && lon === 0);
+  }
+
+  function adaptChangesetCentroids(payload) {
+    var features =
+      (payload && Array.isArray(payload.features) && payload.features) ||
+      (payload && payload.pagination && Array.isArray(payload.pagination.items) && payload.pagination.items) ||
+      (Array.isArray(payload) ? payload : []);
+
+    var points = [];
+    var minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+
+    features.forEach(function (f) {
+      var coords = f && f.geometry && f.geometry.coordinates;
+      if (!Array.isArray(coords) || coords.length < 2) return;
+
+      var lon = Number(coords[0]), lat = Number(coords[1]);
+      if (!validLatLon(lat, lon)) return;
+
+      var p = f.properties || {};
+
+      var derived =
+        num(p.nodes_create) + num(p.nodes_modify) + num(p.nodes_delete) +
+        num(p.ways_create) + num(p.ways_modify) + num(p.ways_delete) +
+        num(p.rels_create) + num(p.rels_modify) + num(p.rels_delete);
+
+      points.push({
+        id: p.changeset_id != null ? p.changeset_id : (lat + "," + lon + "," + points.length),
+        lat: lat,
+        lon: lon,
+        user: p.name || "Unknown",
+        uid: p.uid != null ? p.uid : null,
+        editor: p.editor || null,
+        hashtags: Array.isArray(p.hashtags) ? p.hashtags : [],
+        changes: num(p.map_changes) || derived,
+        at: p.created_at ? new Date(p.created_at) : null
+      });
+
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+      if (lon < minLon) minLon = lon;
+      if (lon > maxLon) maxLon = lon;
+    });
+
+    return {
+      points: points,
+      returned: points.length,
+      total: (payload && payload.pagination && num(payload.pagination.total)) || points.length,
+      bounds: points.length ? [[minLat, minLon], [maxLat, maxLon]] : null
+    };
+  }
+
+  function demoBag() {
+    if (!CONFIG.demo.enabled && !CONFIG.demo.fallbackOnFailure) return null;
+    return window[CONFIG.demo.globalName] || null;
+  }
+
+  function isEmptyModel(kind, data) {
+    if (!data) return true;
+    if (kind === "changesets") return !data.points || data.points.length === 0;
+    return !data.items || data.items.length === 0;
+  }
+
+  function tryDemo(kind, adapt, pick) {
+    var bag = demoBag();
+    if (!bag) return null;
+    try {
+      var raw = pick(bag);
+      if (!raw) return null;
+      var data = adapt(raw);
+      if (isEmptyModel(kind, data)) return null;
+      return { status: "ok", data: data, source: "demo", error: null };
+    } catch (err) {
+      console.warn("[OSMSG] Demo fixture could not be read:", err);
+      return null;
+    }
+  }
+
+  async function resolveSource(kind, fetchLive, adapt, pick) {
+    if (CONFIG.demo.enabled) {
+      var only = tryDemo(kind, adapt, pick);
+      if (only) return only;
+      return {
+        status: "error", data: null, source: "demo",
+        error: new Error("Demo mode is on but window." + CONFIG.demo.globalName + " is missing.")
+      };
+    }
+
+    try {
+      var raw = await fetchLive();
+      var data = adapt(raw);
+      if (!isEmptyModel(kind, data)) {
+        return { status: "ok", data: data, source: "live", error: null };
+      }
+      var fb = tryDemo(kind, adapt, pick);
+      if (fb) { fb.reason = "empty-window"; return fb; }
+      return { status: "empty", data: data, source: "live", error: null };
+
+    } catch (error) {
+      if (error && error.kind === "abort") throw error;
+      var fb2 = tryDemo(kind, adapt, pick);
+      if (fb2) { fb2.reason = "api-error"; fb2.error = error; return fb2; }
+      return { status: "error", data: null, source: "live", error: error };
+    }
+  }
+
+  window.OSMSGData = {
+    getTopHashtags: function (o) {
+      o = o || {};
+      return resolveSource("hashtags",
+        function () { return API.hashtagStats(o); },
+        adaptHashtagStats,
+        function (d) { return d.hashtagStats; });
+    },
+
+    getTopEditors: function (o) {
+      o = o || {};
+      return resolveSource("editors",
+        function () { return API.editorStats(o); },
+        adaptEditorStats,
+        function (d) { return d.editorStats; });
+    },
+
+    getChangesetClusters: function (o) {
+      o = o || {};
+      return resolveSource("changesets",
+        function () { return API.changesetCentroids(o); },
+        adaptChangesetCentroids,
+        function (d) { return d.changesetCentroids; });
+    },
+
+    _api: API,
+    _adapters: {
+      hashtags: adaptHashtagStats,
+      editors: adaptEditorStats,
+      changesets: adaptChangesetCentroids,
+      editorFamilyOf: editorFamilyOf
+    }
+  };
+
+})();
+
+const CONFIG = window.OSMSG_CONFIG;
+if (!CONFIG) throw new Error("OSMSG: the configuration block at the top of app.js failed to run.");
+
+const API_BASE = CONFIG.apiBase;
+const ENDPOINTS = CONFIG.endpoints;
+const API_DOCS_URL = CONFIG.apiDocsUrl;
+const API_HOST = CONFIG.apiHost;
 
 const OSM_API_BASE = "https://api.openstreetmap.org";
 
-const ALL_TIME_START = "2004-08-09T00:00:00Z";
-const RANGE_HOURS = { "1h": 1, "24h": 24, "7d": 168, "30d": 720, "90d": 2160 };
+const ALL_TIME_START = CONFIG.window.allTimeStart;
+const RANGE_HOURS = window.OSMSGTime.RANGE_HOURS;
 const RANGE_LABELS = {
   "1h": "last hour",
   "24h": "last 24 hours",
@@ -37,7 +572,8 @@ const RANGE_LABELS = {
   custom: "custom range",
 };
 const REFRESH_INTERVAL_MS = 60_000;
-const FETCH_TIMEOUT_MS = 30_000;
+const FETCH_TIMEOUT_MS = CONFIG.http.timeoutMs;
+const FETCH_RETRIES = CONFIG.http.retries;
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -177,18 +713,18 @@ const state = {
   inflight: null,
   page: 1,
   pageSize: 25,
-  editorStats: null,
+  windowAnchor: "client",
+  windowClamped: false,
 };
 
 function rangeWindow(k) {
-  const end = nowUTC();
-  if (k === "all") return { start: new Date(ALL_TIME_START), end };
-  if (k === "custom")
-    return {
-      start: state.customStart || new Date(end - 86400000),
-      end: state.customEnd || end,
-    };
-  return { start: new Date(end - (RANGE_HOURS[k] || 24) * 3600000), end };
+  const r = window.OSMSGTime.resolve(k, {
+    customStart: state.customStart,
+    customEnd: state.customEnd,
+  });
+  state.windowAnchor = r.anchor;
+  state.windowClamped = r.clamped;
+  return { start: r.start, end: r.end };
 }
 
 function apiUrl(endpoint, params = {}) {
@@ -201,15 +737,50 @@ function apiUrl(endpoint, params = {}) {
   return url;
 }
 
-async function getJson(url, { signal } = {}) {
-  const res = await fetch(url, {
-    headers: { accept: "application/json" },
-    mode: "cors",
-    signal,
-  });
-  if (!res.ok)
-    throw new Error(`HTTP ${res.status} ${res.statusText || ""}`.trim());
-  return res.json();
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function getJson(url, { signal, retries = FETCH_RETRIES } = {}) {
+  let lastErr;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const onAbort = () => ctrl.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+
+    try {
+      const res = await fetch(url, {
+        headers: { accept: "application/json" },
+        mode: "cors",
+        credentials: "omit",
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        const err = new Error(`HTTP ${res.status} ${res.statusText || ""}`.trim());
+        err.status = res.status;
+        throw err;
+      }
+      return await res.json();
+    } catch (err) {
+      if (signal?.aborted) {
+        const abortErr = new Error("Request cancelled");
+        abortErr.name = "AbortError";
+        throw abortErr;
+      }
+      lastErr = err;
+      if (err.status >= 400 && err.status < 500) throw err;
+      if (attempt < retries) {
+        await _sleep(CONFIG.http.retryBaseDelayMs * Math.pow(2, attempt));
+        continue;
+      }
+      throw lastErr;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  throw lastErr;
 }
 
 const fetchHealth = () => getJson(apiUrl(ENDPOINTS.health));
@@ -223,24 +794,6 @@ const fetchStats = ({ start, end, hashtags = [], tags, limit, signal } = {}) =>
       tags,
       limit,
     }),
-    { signal }
-  );
-
-const fetchHashtagStats = ({ start, end, limit, signal } = {}) =>
-  getJson(
-    apiUrl(ENDPOINTS.hashtagStats, { start: isoUTC(start), end: isoUTC(end), limit }),
-    { signal }
-  );
-
-const fetchEditorStats = ({ start, end, limit = 100, signal } = {}) =>
-  getJson(
-    apiUrl(ENDPOINTS.editorStats, { start: isoUTC(start), end: isoUTC(end), limit }),
-    { signal }
-  );
-
-const fetchMapCentroids = ({ start, end, limit, signal } = {}) =>
-  getJson(
-    apiUrl(ENDPOINTS.map, { start: isoUTC(start), end: isoUTC(end), limit }),
     { signal }
   );
 
@@ -278,7 +831,7 @@ async function fetchUserEditor(uid, start, end) {
   }
 }
 
-const api = { apiUrl, fetchHealth, fetchStats, fetchHashtagStats, fetchEditorStats, fetchMapCentroids, fetchOsmAvatar, fetchUserEditor };
+const api = { apiUrl, fetchHealth, fetchStats, fetchOsmAvatar, fetchUserEditor };
 
 function sumTagKey(ts, k) {
   const n = ts[k];
@@ -551,18 +1104,45 @@ function apply() {
   state.live ? startAutoRefresh() : stopAutoRefresh();
 }
 
+document.addEventListener("osmsg:filter-hashtag", (e) => {
+  const tag = e.detail?.tag;
+  if (!tag) return;
+  addHashtag(tag);
+  apply();
+  document.querySelector(".search-card")?.scrollIntoView({
+    behavior: "smooth",
+    block: "center",
+  });
+  toast({ msg: `Filtering by ${tag}`, icon: "hash" });
+});
+
+function publishWindow(start, end) {
+  window.OSMSG_ACTIVE_WINDOW = { start, end, range: state.range };
+  document.dispatchEvent(
+    new CustomEvent("osmsg:window", {
+      detail: { start, end, range: state.range, hashtags: state.hashtags.slice() },
+    })
+  );
+}
+
 async function fetchData({ silent = false } = {}) {
   state.inflight?.abort();
   state.loading = true;
   if (!silent) showLoading();
   setStatus("loading");
+
+  if (!state.healthCheckedAt || Date.now() - state.healthCheckedAt > 60_000) {
+    await refreshHealth();
+  }
+
   const { start, end } = rangeWindow(state.range);
   state.windowStart = start;
   state.windowEnd = end;
   const ctrl = new AbortController();
   state.inflight = ctrl;
-  const timeout = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   renderWindowBar();
+  publishWindow(start, end);
+
   try {
     const json = await api.fetchStats({
       start,
@@ -570,12 +1150,10 @@ async function fetchData({ silent = false } = {}) {
       hashtags: state.hashtags,
       signal: ctrl.signal,
     });
-    state.rows = json.users.map(transform);
+    state.rows = (json.users || []).map(transform);
     state.lastFetched = new Date();
     state.lastError = null;
     render();
-    refreshHealth();
-    refreshEditorStats(start, end);
     updateLastUpdated();
     if (!silent && state.rows.length)
       toast({ msg: "Updated", icon: "check-circle-2" });
@@ -588,7 +1166,6 @@ async function fetchData({ silent = false } = {}) {
     if (!silent) showError(err);
     else toast({ msg: "Reconnect failed", icon: "cloud-off", err: true });
   } finally {
-    clearTimeout(timeout);
     state.loading = false;
     if (state.inflight === ctrl) state.inflight = null;
   }
@@ -637,7 +1214,6 @@ function render() {
   renderPodium();
   renderTable();
   renderWindowBar();
-  renderHashtagPieChart();
 }
 
 function tagBreakdownHtml(agg, { maxKeys = 10 } = {}) {
@@ -1198,8 +1774,6 @@ function showError(err) {
   $("#ov-toggle-label").textContent = "Show tag breakdown";
   $("#podium").innerHTML = "";
   $("#pagination").hidden = true;
-  state.editorStats = null;
-  hideCharts();
   refreshIcons(tb);
 }
 
@@ -1236,42 +1810,46 @@ async function refreshHealth() {
       last_ts: j.last_ts ? new Date(j.last_ts) : null,
       updated_at: j.updated_at ? new Date(j.updated_at) : null,
     };
+    state.healthCheckedAt = Date.now();
+    window.OSMSGTime.setServerClock(state.health.last_ts);
     updateLastUpdated();
+    renderStaleNotice();
   } catch (err) {
+    state.healthCheckedAt = Date.now();
     console.warn("OSMSG health fetch failed:", err);
   }
 }
 
-let _editorStatsToken = 0;
-async function refreshEditorStats(start, end) {
-  const token = ++_editorStatsToken;
-  try {
-    if (!start || !end) ({ start, end } = rangeWindow(state.range));
-    const json = await api.fetchEditorStats({ start, end, limit: 100 });
-    if (token !== _editorStatsToken) return;
-    const editors = json.editors || [];
-    const sorted = editors
-      .slice()
-      .sort((a, b) => (b.users || 0) - (a.users || 0));
+function renderStaleNotice() {
+  const bar = $(".windowbar");
+  if (!bar) return;
 
-    state.editorStats = {
-      totalEditors: editors.length,
-      top5: sorted.slice(0, 5).map((e) => ({
-        editor: e.editor || "Unknown",
-        changes: e.map_changes || 0,
-        users: e.users || 0,
-        changesets: e.changesets || 0,
-      })),
-    };
+  let el = $("#wb-stale");
+  const stale = window.OSMSGTime.isStale();
 
-    renderEditorBarChart();
-  } catch (err) {
-    if (token !== _editorStatsToken) return;
-
-    state.editorStats = null;
-    renderEditorBarChart();
-    console.warn("Editor stats fetch failed:", err);
+  if (!stale) {
+    el?.remove();
+    return;
   }
+
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "wb-item";
+    el.id = "wb-stale";
+    el.style.color = "var(--warn-ink)";
+    bar.appendChild(el);
+  }
+
+  const last = state.health?.last_ts;
+  el.innerHTML =
+    `<i data-lucide="alert-triangle" class="ico-sm"></i>` +
+    `<span class="k">Data</span>` +
+    `<span class="v">${escapeHtml(window.OSMSGTime.lagLabel())}</span>`;
+  el.title = last
+    ? `The OSMSG ingest has not advanced since ${last.toISOString()}.\n` +
+      `Time presets are anchored to that timestamp so they return data instead of an empty window.`
+    : "";
+  refreshIcons(el);
 }
 
 function renderWindowBar() {
